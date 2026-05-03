@@ -1,0 +1,1362 @@
+{
+  "name": "Clasificador de mails",
+  "nodes": [
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-attachments",
+              "leftValue": "={{ Object.keys($binary || {}).length > 0 }}",
+              "rightValue": "=",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "76d64b58-6445-442c-805f-7231c57f4b52",
+      "name": "¿Tiene Adjuntos?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1104,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const email = $input.first().json;\nconst emailData = {\n  messageId: email.id || '',\n  threadId: email.threadId || '',\n  from: email.from?.value?.[0]?.address || email.from?.text || String(email.from) || '',\n  subject: email.subject || '(Sin asunto)',\n  body: email.text || email.snippet || '',\n  date: email.date || new Date().toISOString(),\n  hasAttachments: email.hasAttachments || false \n};\n\nif (emailData.body.length > 3000) {\n  emailData.body = emailData.body.substring(0, 3000) + '... [TRUNCADO]';\n}\n\nreturn [{ json: emailData }];"
+      },
+      "id": "3bd22b66-948f-42df-bdc7-79539f9680db",
+      "name": "Preparar Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        560
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama3.2\",\n  \"stream\": false,\n  \"prompt\": \"Eres un asistente de clasificación de emails de clientes. Analiza el siguiente email y responde ÚNICAMENTE con un JSON válido, sin texto adicional, sin markdown, sin explicaciones.\\n\\nEmail:\\nDe: {{ $json.from }}\\nAsunto: {{ $json.subject }}\\nCuerpo: {{ $json.body }}\\n\\nResponde SOLO con este JSON:\\n{\\\"categoria\\\": \\\"[Consulta|Soporte|Urgente]\\\", \\\"prioridad\\\": \\\"[alta|media|baja]\\\", \\\"resumen\\\": \\\"[máximo 100 caracteres]\\\", \\\"requiere_respuesta\\\": [true|false]}\\n\\nReglas:\\n- Consulta: preguntas generales, información, cotizaciones\\n- Soporte: problemas técnicos, reclamos, errores\\n- Urgente: palabras como urgente/crítico/emergencia/ASAP o tono muy alterado\\n- requiere_respuesta: false solo para newsletters, notificaciones automáticas\"\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "acbf0b19-a735-418c-acb3-4ebbf0b86cce",
+      "name": "Ollama - Clasificar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -400,
+        704
+      ],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parsear respuesta de Ollama\nconst inputData = $input.first().json;\nconst emailData = $('Preparar Email').first().json;\n\nlet clasificacion = {\n  categoria: 'Soporte',\n  prioridad: 'media',\n  resumen: 'Error al clasificar - revisión manual requerida',\n  requiere_respuesta: true,\n  parse_error: false\n};\n\ntry {\n  // Ollama devuelve la respuesta en .response\n  const rawResponse = inputData.response || inputData.text || '';\n  \n  // Limpiar posibles artefactos de markdown\n  const cleanResponse = rawResponse\n    .replace(/```json/gi, '')\n    .replace(/```/g, '')\n    .trim();\n  \n  const parsed = JSON.parse(cleanResponse);\n  \n  // Validar campos\n  const validCategorias = ['Consulta', 'Soporte', 'Urgente'];\n  const validPrioridades = ['alta', 'media', 'baja'];\n  \n  clasificacion = {\n    categoria: validCategorias.includes(parsed.categoria) ? parsed.categoria : 'Soporte',\n    prioridad: validPrioridades.includes(parsed.prioridad) ? parsed.prioridad : 'media',\n    resumen: (parsed.resumen || '').substring(0, 150),\n    requiere_respuesta: parsed.requiere_respuesta !== false,\n    parse_error: false\n  };\n  \n} catch (e) {\n  clasificacion.parse_error = true;\n  clasificacion.error_detail = e.message;\n}\n\n// Combinar con datos del email\nreturn [{\n  json: {\n    ...emailData,\n    ...clasificacion,\n    gmail_label: `AutoClasificado/${clasificacion.categoria}`,\n    fecha_procesado: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "26e2f6b8-242c-4d9d-8fa2-6e5b5b88e365",
+      "name": "Parsear Respuesta Ollama",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -256,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "is-error",
+              "leftValue": "={{ $json.parse_error }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "687aa93b-3789-4b76-882d-5f4f153dba6d",
+      "name": "¿Error de Parseo?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        0,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.categoria }}",
+                    "rightValue": "Consulta",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "307d19b9-6ebb-4b15-ad49-765f66f77168"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Consulta"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.categoria }}",
+                    "rightValue": "Soporte",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "ce8e6bf7-bfad-4d8f-9fe7-9b0a5d5a289c"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Soporte"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.categoria }}",
+                    "rightValue": "Urgente",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "eb21f71c-3b8d-4a1c-9bd0-d1fc093b53dd"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Urgente"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "726b531f-6a8a-4334-bb64-07fa25ccc4f6",
+      "name": "Switch por Categoría",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        272,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "Label_CONSULTA_ID"
+        ]
+      },
+      "id": "41a1d0b7-9cd8-4ba3-b538-131aedbca074",
+      "name": "Label: Consulta",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        16
+      ],
+      "webhookId": "e8d91a80-f806-405d-abad-20d017b0691e",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      },
+      "notes": "Reemplazar Label_CONSULTA_ID con el ID real de Gmail"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "Label_SOPORTE_ID"
+        ]
+      },
+      "id": "181dd852-f46b-4a11-94d2-c84cdb5ab09d",
+      "name": "Label: Soporte",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        256
+      ],
+      "webhookId": "3e0a3fb7-0747-4be3-91ed-810b7b08bdaa",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "Label_URGENTE_ID"
+        ]
+      },
+      "id": "47d6d997-4e75-45a4-a76c-c7f4d8fe7b28",
+      "name": "Label: Urgente",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        720,
+        480
+      ],
+      "webhookId": "6726673e-2999-416e-94c5-f7634784e4a2",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "markAsRead",
+        "messageId": "={{ $json.messageId }}"
+      },
+      "id": "3fd378f3-e35c-44ca-b6e7-6fea8737fd08",
+      "name": "Marcar como Leído",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1056,
+        256
+      ],
+      "webhookId": "7b977b39-230f-48d0-a959-21903cda4167",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "TU_CHAT_ID",
+        "text": "=📧 *Nuevo email clasificado*\n\n*De:* {{ $json.from }}\n*Asunto:* {{ $json.subject }}\n*Categoría:* {{ $json.categoria }} {{ $json.categoria === 'Urgente' ? '🔴' : $json.categoria === 'Soporte' ? '🟡' : '🟢' }}\n*Prioridad:* {{ $json.prioridad }}\n*Resumen:* {{ $json.resumen }}\n*Requiere respuesta:* {{ $json.requiere_respuesta ? 'Sí' : 'No' }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "6d24225f-e68d-47c2-baec-4d75d6384116",
+      "name": "Telegram - Notificar",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1536,
+        256
+      ],
+      "webhookId": "b205a0d1-647d-4b9a-b65b-e7a910ce9151",
+      "credentials": {
+        "telegramApi": {
+          "id": "TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account 3"
+        }
+      },
+      "notes": "Reemplazar TU_CHAT_ID con tu Chat ID de Telegram"
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "Label_7336524248294090513"
+        ]
+      },
+      "id": "c9405a0b-7ab6-4ed7-aa49-6b319ff6c279",
+      "name": "Label: Con-Adjuntos",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        -720,
+        -144
+      ],
+      "webhookId": "fb8349d9-a52d-42a7-98e9-1eb609bae450",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "TU_CHAT_ID",
+        "text": "=📎 *Email con adjuntos - Revisión manual*\n\n*De:* {{ $json.from }}\n*Asunto:* {{ $json.subject }}\n*Adjuntos:* {{ $json.attachments ? $json.attachments.length : 'desconocido' }}\n\n⚠️ Este email requiere tu atención directa.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "48f6a268-2b81-44f9-9259-b8e7404edd65",
+      "name": "Telegram - Alerta Adjuntos",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -80,
+        -144
+      ],
+      "webhookId": "74491fbe-ae3f-454a-878d-3b0fda743e8c",
+      "credentials": {
+        "telegramApi": {
+          "id": "TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": [
+          "Label_3176960445661858236"
+        ]
+      },
+      "id": "25b579e5-ee5a-4abc-9ce2-d1cffe6b142b",
+      "name": "Label: Revisión Manual",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        240,
+        832
+      ],
+      "webhookId": "35cc5f52-6276-4048-9db0-c424866708a4",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1X_JVN9Sthl1QmIroq8vGzN3jLLFAvRs7M0wT8Gjfs_U",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Resumen",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "FECHA": "={{ $node[\"Recepción de mail\"].json[\"headers\"][\"date\"] }}",
+            "REMITENTE": "={{ $node[\"Recepción de mail\"].json[\"headers\"][\"from\"] }}",
+            "ASUNTO": "={{ $node[\"Recepción de mail\"].json[\"text\"] }}",
+            "CATEGORÍA": "Requiere revisión manual",
+            "PRIORIDAD": "ALTA",
+            "RESUMEN": "={{ $node[\"Ollama - Clasificar\"].json[\"error\"] }}",
+            "DOCUMENTOS ADJUNTOS": "NO",
+            "RESPONDIDO": "NO"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "FECHA",
+              "displayName": "FECHA",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "REMITENTE",
+              "displayName": "REMITENTE",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ASUNTO",
+              "displayName": "ASUNTO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "CATEGORÍA",
+              "displayName": "CATEGORÍA",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "PRIORIDAD",
+              "displayName": "PRIORIDAD",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "RESUMEN",
+              "displayName": "RESUMEN",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "DOCUMENTOS ADJUNTOS",
+              "displayName": "DOCUMENTOS ADJUNTOS",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "RESPONDIDO",
+              "displayName": "RESPONDIDO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "FECHA RESPONDIDO",
+              "displayName": "FECHA RESPONDIDO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "RESUELTO",
+              "displayName": "RESUELTO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "605b23bc-ba50-4b76-89ef-83a18fb5b221",
+      "name": "Sheets - Error",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        576,
+        848
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "U3uWq16LxhXNFE5f",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "TU_CHAT_ID",
+        "text": "=🔴 *ERROR en clasificación de email*\n\n*De:* {{ $json.from }}\n*Asunto:* {{ $json.subject }}\n*Error:* {{ $json.error_detail || 'Error desconocido' }}\n\n⚠️ El email fue movido a Revisión Manual.",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "a6b8f7fb-5a3b-42e3-9966-800d42690bab",
+      "name": "Telegram - Alerta Error",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        912,
+        848
+      ],
+      "webhookId": "ac99e5f7-1938-447c-8bff-967066af9590",
+      "credentials": {
+        "telegramApi": {
+          "id": "TELEGRAM_CREDENTIAL_ID",
+          "name": "Telegram account 3"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {},
+        "options": {
+          "dataPropertyAttachmentsPrefixName": "attachment_",
+          "downloadAttachments": "={{ true }}"
+        }
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -1360,
+        304
+      ],
+      "id": "56846514-4e48-4ba5-b611-a730bd85815b",
+      "name": "Recepción de mail",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1X_JVN9Sthl1QmIroq8vGzN3jLLFAvRs7M0wT8Gjfs_U",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Resumen",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "PRIORIDAD": "={{ $node[\"Parsear Respuesta Ollama\"].json[\"categoría\"] == 'Urgente' ? 'ALTA' : ($node[\"Parsear Respuesta Ollama\"].json[\"categoría\"] == 'Soporte' ? 'MEDIA' : 'BAJA') }}",
+            "FECHA": "={{ $node[\"Recepción de mail\"].json[\"headers\"][\"date\"] }}",
+            "REMITENTE": "={{ $node[\"Recepción de mail\"].json[\"headers\"][\"from\"] }}",
+            "ASUNTO": "={{ $node[\"Recepción de mail\"].json[\"text\"] }}",
+            "CATEGORÍA": "={{ $node[\"Label: Consulta\"] ? 'Consulta' : ($node[\"Label: Soporte\"] ? 'Soporte' : 'Urgente') }}",
+            "RESUMEN": "={{ $node[\"Parsear Respuesta Ollama\"].json[\"resumen\"] }}",
+            "DOCUMENTOS ADJUNTOS": "NO",
+            "RESPONDIDO": "NO"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "FECHA",
+              "displayName": "FECHA",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "REMITENTE",
+              "displayName": "REMITENTE",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "ASUNTO",
+              "displayName": "ASUNTO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "CATEGORÍA",
+              "displayName": "CATEGORÍA",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "PRIORIDAD",
+              "displayName": "PRIORIDAD",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "RESUMEN",
+              "displayName": "RESUMEN",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "DOCUMENTOS ADJUNTOS",
+              "displayName": "DOCUMENTOS ADJUNTOS",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "RESPONDIDO",
+              "displayName": "RESPONDIDO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "FECHA RESPONDIDO",
+              "displayName": "FECHA RESPONDIDO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "RESUELTO",
+              "displayName": "RESUELTO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "ac502bfc-5a2e-4502-a84b-f8212669d4c4",
+      "name": "Google Sheets - Agregar Fila - Mail clasificado",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1296,
+        256
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "U3uWq16LxhXNFE5f",
+          "name": "Google Sheets account"
+        }
+      },
+      "notes": "Reemplazar TU_GOOGLE_SHEETS_ID con el ID de tu planilla"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1X_JVN9Sthl1QmIroq8vGzN3jLLFAvRs7M0wT8Gjfs_U",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Resumen",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1X_JVN9Sthl1QmIroq8vGzN3jLLFAvRs7M0wT8Gjfs_U/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "FECHA": "={{ $node[\"Recepción de mail\"].json[\"headers\"][\"date\"] }}",
+            "REMITENTE": "={{ $node[\"Recepción de mail\"].json[\"headers\"][\"from\"] }}",
+            "ASUNTO": "={{ $node[\"Recepción de mail\"].json[\"text\"] }}",
+            "CATEGORÍA": "=Requiere revisión de adjuntos",
+            "PRIORIDAD": "=Alta",
+            "RESUMEN": "=No disponible",
+            "DOCUMENTOS ADJUNTOS": "=SI",
+            "RESPONDIDO": "NO",
+            "FECHA RESPONDIDO": "="
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "FECHA",
+              "displayName": "FECHA",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "REMITENTE",
+              "displayName": "REMITENTE",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "ASUNTO",
+              "displayName": "ASUNTO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "CATEGORÍA",
+              "displayName": "CATEGORÍA",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "PRIORIDAD",
+              "displayName": "PRIORIDAD",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "RESUMEN",
+              "displayName": "RESUMEN",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "DOCUMENTOS ADJUNTOS",
+              "displayName": "DOCUMENTOS ADJUNTOS",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "RESPONDIDO",
+              "displayName": "RESPONDIDO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "FECHA RESPONDIDO",
+              "displayName": "FECHA RESPONDIDO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "RESUELTO",
+              "displayName": "RESUELTO",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        -384,
+        -144
+      ],
+      "id": "191ff443-2d9c-435c-8f63-be323744377c",
+      "name": "Google Sheets - Agregar Fila - Mail con adjuntos",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "U3uWq16LxhXNFE5f",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## Recepción de mail\nTrigger con método polling que monitorea la bandeja de entrada y activa el flujo ante la llegada de nuevos correos.",
+        "height": 320
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -1440,
+        144
+      ],
+      "typeVersion": 1,
+      "id": "a82e3c9d-0348-421b-8f60-918e486d3a9d",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## ¿Tiene Adjuntos?\nFiltro booleano que evalúa la presencia de archivos binarios para desviar el flujo hacia el proceso correspondiente.",
+        "height": 336
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -1168,
+        144
+      ],
+      "typeVersion": 1,
+      "id": "3f5bd68c-a213-4345-aaaf-db447387c8c8",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "## Label: Con-Adjuntos\nEtiquetado en Gmail para identificar correos que contienen archivos adjuntos.",
+        "height": 272,
+        "width": 256
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -800,
+        -272
+      ],
+      "typeVersion": 1,
+      "id": "2a6b19b9-acf4-427d-855c-0f10523193f6",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "## Google Sheets - Agregar Fila - Mail con adjuntos\nRegistro del correo con adjuntos en hoja de cálculo externa para trazabilidad y seguimiento.",
+        "height": 400
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -464,
+        -368
+      ],
+      "typeVersion": 1,
+      "id": "94d00775-5683-4bc4-9b7a-05497a92e231",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "## Telegram - Alerta Adjuntos\nNotificación inmediata sobre la recepción de un correo con archivos adjuntos.\n",
+        "height": 352,
+        "width": 224
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -144,
+        -320
+      ],
+      "typeVersion": 1,
+      "id": "e321a1e9-a50a-47ac-8b3a-9501dd8f6e84",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "## Preparar Email\nNodo de función que limpia, estructura y normaliza los datos del correo antes de enviarlo al modelo de IA.",
+        "height": 304
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -800,
+        400
+      ],
+      "typeVersion": 1,
+      "id": "b4402b0e-8098-4626-8462-9d3e8ee3c879",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "content": "\n\n\n\n\n\n\n\n\n\n## Ollama - Clasificar\nProcesamiento de lenguaje natural local para categorización automática, asignación de prioridad y generación de resumen del correo.",
+        "height": 352
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -464,
+        688
+      ],
+      "typeVersion": 1,
+      "id": "a8971f26-1587-487d-b2f7-d49d8f3f315d",
+      "name": "Sticky Note6"
+    },
+    {
+      "parameters": {
+        "content": "## Parsear Respuesta Ollama\nExtracción y validación de los datos estructurados devueltos por el modelo, con fallback ante respuestas malformadas.",
+        "height": 368
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -352,
+        240
+      ],
+      "typeVersion": 1,
+      "id": "fd30d8df-6eb4-41dd-bbb9-0f3e17a799d7",
+      "name": "Sticky Note7"
+    },
+    {
+      "parameters": {
+        "content": "## Switch por Categoría\nEnrutador lógico que define el camino de procesamiento según la clasificación asignada: Consulta, Soporte o Urgente.",
+        "height": 320,
+        "width": 304
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        192,
+        112
+      ],
+      "typeVersion": 1,
+      "id": "91d6979a-fd25-4885-85cc-947c8c84a6e3",
+      "name": "Sticky Note8"
+    },
+    {
+      "parameters": {
+        "content": "## ¿Error de Parseo?\nControl de resiliencia que detecta respuestas inválidas de la IA y desvía el flujo hacia revisión manual.",
+        "height": 336
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -80,
+        256
+      ],
+      "typeVersion": 1,
+      "id": "3f14fc98-9a50-4183-b63a-d85a08440180",
+      "name": "Sticky Note9"
+    },
+    {
+      "parameters": {
+        "content": "## Label: Revisión Manual\nGestión de excepciones para correos que la IA no pudo procesar correctamente.",
+        "height": 336
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        176,
+        672
+      ],
+      "typeVersion": 1,
+      "id": "cf2668e5-d09f-4c0e-9f6c-0d2b06ceade4",
+      "name": "Sticky Note10"
+    },
+    {
+      "parameters": {
+        "content": "## Sheets - Error\nRegistro de errores de procesamiento para análisis y mejora continua del flujo.",
+        "height": 320
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        496,
+        688
+      ],
+      "typeVersion": 1,
+      "id": "55621638-540d-4777-a8f5-62ec37d76222",
+      "name": "Sticky Note11"
+    },
+    {
+      "parameters": {
+        "content": "## Label: Consulta / Soporte / Urgente\nEtiquetado automático en Gmail según la categoría asignada por la IA para organización visual de la bandeja.",
+        "height": 832
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        640,
+        -176
+      ],
+      "typeVersion": 1,
+      "id": "ee0db827-b7f6-4a6f-859e-8286d98cbe39",
+      "name": "Sticky Note12"
+    },
+    {
+      "parameters": {
+        "content": "## Google Sheets - Agregar Fila - Mail clasificado\nRegistro del correo clasificado con categoría, prioridad y resumen para gobernanza y auditoría.\n",
+        "height": 416,
+        "width": 208
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1232,
+        16
+      ],
+      "typeVersion": 1,
+      "id": "971d7fad-561a-422e-99e6-af5a678409d2",
+      "name": "Sticky Note13"
+    },
+    {
+      "parameters": {
+        "content": "## Marcar como Leído\nActualización de estado en Gmail para evitar reprocesamiento del correo en ejecuciones posteriores.",
+        "height": 368,
+        "width": 208
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        992,
+        64
+      ],
+      "typeVersion": 1,
+      "id": "ef0c556d-3d56-482c-bd58-4979048a4495",
+      "name": "Sticky Note14"
+    },
+    {
+      "parameters": {
+        "content": "## Telegram - Notificar\nAlerta en tiempo real con el resultado de la clasificación para gestión inmediata.",
+        "height": 352,
+        "width": 192
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1472,
+        80
+      ],
+      "typeVersion": 1,
+      "id": "b378d373-79ae-4578-af2e-d2d2641210f0",
+      "name": "Sticky Note15"
+    },
+    {
+      "parameters": {
+        "content": "## Telegram - Alerta Error\nNotificación inmediata ante fallos en el procesamiento para intervención manual urgente.",
+        "height": 320
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        832,
+        688
+      ],
+      "typeVersion": 1,
+      "id": "2a771118-99b7-449e-ad2b-18f73397b057",
+      "name": "Sticky Note16"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "¿Tiene Adjuntos?": {
+      "main": [
+        [
+          {
+            "node": "Label: Con-Adjuntos",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Preparar Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Label: Con-Adjuntos": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Agregar Fila - Mail con adjuntos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar Email": {
+      "main": [
+        [
+          {
+            "node": "Ollama - Clasificar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama - Clasificar": {
+      "main": [
+        [
+          {
+            "node": "Parsear Respuesta Ollama",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Label: Revisión Manual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parsear Respuesta Ollama": {
+      "main": [
+        [
+          {
+            "node": "¿Error de Parseo?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Error de Parseo?": {
+      "main": [
+        [
+          {
+            "node": "Label: Revisión Manual",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Switch por Categoría",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch por Categoría": {
+      "main": [
+        [
+          {
+            "node": "Label: Consulta",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Label: Soporte",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Label: Urgente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Label: Consulta": {
+      "main": [
+        [
+          {
+            "node": "Marcar como Leído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Label: Soporte": {
+      "main": [
+        [
+          {
+            "node": "Marcar como Leído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Label: Urgente": {
+      "main": [
+        [
+          {
+            "node": "Marcar como Leído",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Marcar como Leído": {
+      "main": [
+        [
+          {
+            "node": "Google Sheets - Agregar Fila - Mail clasificado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Label: Revisión Manual": {
+      "main": [
+        [
+          {
+            "node": "Sheets - Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sheets - Error": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Alerta Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Recepción de mail": {
+      "main": [
+        [
+          {
+            "node": "¿Tiene Adjuntos?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets - Agregar Fila - Mail clasificado": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Notificar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets - Agregar Fila - Mail con adjuntos": {
+      "main": [
+        [
+          {
+            "node": "Telegram - Alerta Adjuntos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "00d05dc8-1538-4d40-b0f4-375483da88fd",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "c98dbdc9c605176fda2d7894a5a89277cf9333bd3d284c70daddf3f2d9d9909a"
+  },
+  "id": "YiBMZNQwfQOTQPBn",
+  "tags": []
+}
